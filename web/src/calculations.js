@@ -28,15 +28,17 @@ export function fuelSummary(fills = [], logs = []) {
         ? number(fill.litres) / (number(fill.odometer) - number(ordered[index - 1].odometer)) * 100 : null
     };
   });
-  const kmBetweenFirstAndLast = ordered.length > 1 ? number(ordered.at(-1).odometer) - number(ordered[0].odometer) : 0;
+  const reliableSequence = ordered.length > 1 && ordered.every((fill, i) => fill.full_tank !== false && number(fill.odometer) > 0 && (i === 0 || number(fill.odometer) > number(ordered[i - 1].odometer)));
+  const kmBetweenFirstAndLast = reliableSequence ? number(ordered.at(-1).odometer) - number(ordered[0].odometer) : 0;
   const measuredLitres = ordered.slice(1).reduce((sum, fill) => sum + number(fill.litres), 0);
-  const calculatedAverage = kmBetweenFirstAndLast > 0 ? measuredLitres / kmBetweenFirstAndLast * 100 : 0;
+  const calculatedAverage = reliableSequence && kmBetweenFirstAndLast > 0 ? measuredLitres / kmBetweenFirstAndLast * 100 : 0;
   const latest = ordered.at(-1) || null;
   return {
     ordered, periods, totalPaid: ordered.reduce((sum, x) => sum + number(x.total_paid), 0),
     totalLitres: ordered.reduce((sum, x) => sum + number(x.litres), 0),
     calculatedAverage, latestPrice: latest && number(latest.litres) > 0 ? number(latest.total_paid) / number(latest.litres) : 0,
-    estimatedCostPerKm: number(calculatedAverage) / 100 * (latest && number(latest.litres) > 0 ? number(latest.total_paid) / number(latest.litres) : 0)
+    estimatedCostPerKm: number(calculatedAverage) / 100 * (latest && number(latest.litres) > 0 ? number(latest.total_paid) / number(latest.litres) : 0),
+    averageReliable: reliableSequence
   };
 }
 
@@ -52,7 +54,20 @@ export function fuelFor(log, logs = [], fills = [], settings = {}) {
   const latestBeforeLog = summary.ordered.filter(fill => dateKey(fill.fill_date) <= dateKey(log.work_date)).at(-1);
   const price = latestBeforeLog && number(latestBeforeLog.litres) > 0 ? number(latestBeforeLog.total_paid) / number(latestBeforeLog.litres) : 0;
   const average = number(settings.avg_consumption) || summary.calculatedAverage;
-  return km * average / 100 * price;
+  const automatic = average > 0 && price > 0 ? average / 100 * price : 0;
+  const rate = automatic || number(settings.manual_cost_per_km);
+  return km * rate;
+}
+
+export function fuelDetailsFor(log, fills = [], logs = []) {
+  const summary = fuelSummary(fills, logs), date = dateKey(log.work_date);
+  const latest = summary.ordered.filter(fill => dateKey(fill.fill_date) <= date).at(-1) || null;
+  const period = summary.periods.find(item => date >= dateKey(item.fill.fill_date) && item.next && date < dateKey(item.next.fill_date));
+  return {
+    fillDate: latest ? dateKey(latest.fill_date) : '',
+    ratePerKm: period?.costPerKm ?? null,
+    pricePerLitre: latest && number(latest.litres) > 0 ? number(latest.total_paid) / number(latest.litres) : null
+  };
 }
 
 export function summarize(logs = [], allLogs = logs, fills = [], settings = {}) {
@@ -84,8 +99,9 @@ export function summarize(logs = [], allLogs = logs, fills = [], settings = {}) 
 function shiftHoursFor(shift, override, settings) {
   if (!shift || shift === 'Off') return 0;
   if (override !== '' && override != null && Number.isFinite(Number(override))) return number(override);
-  const from = shift === 'Morning' ? settings.morning_start : settings.night_start;
-  const to = shift === 'Morning' ? settings.morning_end : settings.night_end;
+  const configured = (settings.shift_types || []).find(item => item.name === shift);
+  const from = configured?.start ?? (shift === 'Morning' ? settings.morning_start : settings.night_start);
+  const to = configured?.end ?? (shift === 'Morning' ? settings.morning_end : settings.night_end);
   if (!from || !to) return 0;
   const [fh, fm] = from.split(':').map(Number), [th, tm] = to.split(':').map(Number);
   return ((th * 60 + tm - (fh * 60 + fm) + 1440) % 1440) / 60;
@@ -95,17 +111,17 @@ export const timeDuration = (from, to) => shiftHoursFor('Morning', '', { morning
 
 export function shiftDay(entry, settings, loggedRows = [], today = new Date().toISOString().slice(0, 10), averageRate = 0) {
   const date = dateKey(entry.work_date);
-  const types = ['Morning', 'Night', 'Off'];
+  const types = [...(settings.shift_types || []).map(x => x.name), 'Morning', 'Night', 'Off'];
   const unknown = [entry.shift1, entry.shift2].some(x => x && !types.includes(x));
   const hours = shiftHours(entry, '1', settings) + shiftHours(entry, '2', settings);
   const logged = loggedRows.filter(row => dateKey(row.work_date) === date);
   const loggedHours = logged.reduce((sum, row) => sum + number(row.hours), 0);
   const loggedIncome = logged.reduce((sum, row) => sum + number(row.earnings) + number(row.tips), 0);
-  const rate1 = entry.shift1 === 'Morning' && number(settings.morning_rate) > 0 ? number(settings.morning_rate) : averageRate;
-  const rate2 = entry.shift2 === 'Morning' && number(settings.morning_rate) > 0 ? number(settings.morning_rate) : averageRate;
-  const rate3 = entry.shift1 === 'Night' && number(settings.night_rate) > 0 ? number(settings.night_rate) : averageRate;
-  const rate4 = entry.shift2 === 'Night' && number(settings.night_rate) > 0 ? number(settings.night_rate) : averageRate;
-  const expected = shiftHours(entry, '1', settings) * (entry.shift1 === 'Night' ? rate3 : rate1) + shiftHours(entry, '2', settings) * (entry.shift2 === 'Night' ? rate4 : rate2);
+  const configuredRate = name => {
+    const configured=(settings.shift_types||[]).find(x=>x.name===name);
+    return number(configured?.rate) || number(name==='Morning'?settings.morning_rate:name==='Night'?settings.night_rate:0) || averageRate;
+  };
+  const expected = shiftHours(entry, '1', settings) * configuredRate(entry.shift1) + shiftHours(entry, '2', settings) * configuredRate(entry.shift2);
   let status = '';
   if (unknown) status = 'Unknown shift';
   else if (!entry.shift1 && entry.shift2) status = 'Pick Shift 1 first';
