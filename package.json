@@ -1,0 +1,7 @@
+{
+  "name": "courier-finance-tracker",
+  "private": true,
+  "scripts": {"dev": "concurrently \"npm run dev --workspace server\" \"npm run dev --workspace web\"", "build": "npm run build --workspace web", "start": "npm run start --workspace server"},
+  "workspaces": ["server", "web"],
+  "devDependencies": {"concurrently": "^9.1.2"}
+}
