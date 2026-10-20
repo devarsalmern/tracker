@@ -20,8 +20,12 @@ export function fuelSummary(fills = [], logs = []) {
     const workDays = inPeriod.filter(log => distanceOf(log) > 0).length;
     return {
       fill, next, workDays, km,
-      costPerKm: next && km > 0 ? number(fill.total_paid) / km : null,
-      costPerWorkDay: next && workDays > 0 ? number(fill.total_paid) / workDays : null,
+      // Allocate the fill-up amount across the kilometres already logged in
+      // this period, including the latest (still open) period. As more work is
+      // logged, its per-km share adjusts; the period total remains the amount
+      // actually paid for this fill-up.
+      costPerKm: km > 0 ? number(fill.total_paid) / km : null,
+      costPerWorkDay: workDays > 0 ? number(fill.total_paid) / workDays : null,
       kmSincePrevious: index > 0 && number(fill.odometer) > number(ordered[index - 1].odometer)
         ? number(fill.odometer) - number(ordered[index - 1].odometer) : null,
       tankConsumption: index > 0 && number(fill.odometer) > number(ordered[index - 1].odometer)
@@ -48,7 +52,7 @@ export function fuelFor(log, logs = [], fills = [], settings = {}) {
   if (km <= 0) return 0;
   const summary = fuelSummary(fills, logs);
   if (settings.fuel_method === 'split') {
-    const period = summary.periods.find(item => dateKey(log.work_date) >= dateKey(item.fill.fill_date) && item.next && dateKey(log.work_date) < dateKey(item.next.fill_date));
+    const period = summary.periods.find(item => dateKey(log.work_date) >= dateKey(item.fill.fill_date) && (!item.next || dateKey(log.work_date) < dateKey(item.next.fill_date)));
     if (period?.costPerKm != null) return km * period.costPerKm;
   }
   const latestBeforeLog = summary.ordered.filter(fill => dateKey(fill.fill_date) <= dateKey(log.work_date)).at(-1);
